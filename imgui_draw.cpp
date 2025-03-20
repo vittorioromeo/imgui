@@ -4010,6 +4010,12 @@ const char* ImFont::CalcWordWrapPositionA(float scale, const char* text, const c
 
             // Allow wrapping after punctuation.
             inside_word = (c != '.' && c != ',' && c != ';' && c != '!' && c != '?' && c != '\"');
+
+            // Don't wrap decimal numbers
+            const auto isDigit = [](unsigned int c) { return c >= '0' && c <= '9'; };
+
+            if (c == '.' && s+1 < text_end && isDigit(*(s + 1)))
+                inside_word = true;
         }
 
         // We ignore blank width at the end of the line (they can be skipped)
