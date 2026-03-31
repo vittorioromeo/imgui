@@ -1,4 +1,4 @@
-// dear imgui, v1.92.6 WIP
+// dear imgui, v1.92.7 WIP
 // (tables and columns code)
 
 /*
@@ -699,36 +699,14 @@ void ImGui::TableBeginApplyRequests(ImGuiTable* table)
     }
 
     // Handle reordering request
-    // Note: we don't clear ReorderColumn after handling the request.
+    // Note: we don't clear ReorderColumn after handling the request (FIXME: clarify why or add a test).
     if (table->InstanceCurrent == 0)
     {
-        if (table->HeldHeaderColumn == -1 && table->ReorderColumn != -1)
-            table->ReorderColumn = -1;
         table->HeldHeaderColumn = -1;
-        if (table->ReorderColumn != -1 && table->ReorderColumnDir != 0)
+        if (table->ReorderColumn != -1 && table->ReorderColumnDstOrder != -1)
         {
-            // We need to handle reordering across hidden columns.
-            // In the configuration below, moving C to the right of E will lead to:
-            //    ... C [D] E  --->  ... [D] E  C   (Column name/index)
-            //    ... 2  3  4        ...  2  3  4   (Display order)
-            const int reorder_dir = table->ReorderColumnDir;
-            IM_ASSERT(reorder_dir == -1 || reorder_dir == +1);
-            IM_ASSERT(table->Flags & ImGuiTableFlags_Reorderable);
-            ImGuiTableColumn* src_column = &table->Columns[table->ReorderColumn];
-            ImGuiTableColumn* dst_column = &table->Columns[(reorder_dir == -1) ? src_column->PrevEnabledColumn : src_column->NextEnabledColumn];
-            IM_UNUSED(dst_column);
-            const int src_order = src_column->DisplayOrder;
-            const int dst_order = dst_column->DisplayOrder;
-            src_column->DisplayOrder = (ImGuiTableColumnIdx)dst_order;
-            for (int order_n = src_order + reorder_dir; order_n != dst_order + reorder_dir; order_n += reorder_dir)
-                table->Columns[table->DisplayOrderToIndex[order_n]].DisplayOrder -= (ImGuiTableColumnIdx)reorder_dir;
-            IM_ASSERT(dst_column->DisplayOrder == dst_order - reorder_dir);
-
-            // Display order is stored in both columns->IndexDisplayOrder and table->DisplayOrder[]. Rebuild later from the former.
-            for (int column_n = 0; column_n < table->ColumnsCount; column_n++)
-                table->DisplayOrderToIndex[table->Columns[column_n].DisplayOrder] = (ImGuiTableColumnIdx)column_n;
-            table->ReorderColumnDir = 0;
-            table->IsSettingsDirty = true;
+            TableSetColumnDisplayOrder(table, table->ReorderColumn, table->ReorderColumnDstOrder);
+            table->ReorderColumnDstOrder = -1;
         }
     }
 
@@ -740,6 +718,49 @@ void ImGui::TableBeginApplyRequests(ImGuiTable* table)
         table->IsResetDisplayOrderRequest = false;
         table->IsSettingsDirty = true;
     }
+}
+
+// Apply immediately. See TableQueueSetColumnDisplayOrder() for additional checks/constraints.
+void ImGui::TableSetColumnDisplayOrder(ImGuiTable* table, int column_n, int dst_order)
+{
+    IM_ASSERT(column_n >= 0 && column_n < table->ColumnsCount);
+    IM_ASSERT(dst_order >= 0 && dst_order < table->ColumnsCount);
+
+    ImGuiTableColumn* src_column = &table->Columns[column_n];
+    const int src_order = src_column->DisplayOrder;
+    if (src_order == dst_order)
+        return;
+    const int reorder_dir = (dst_order < src_order) ? -1 : +1;
+
+    src_column->DisplayOrder = (ImGuiTableColumnIdx)dst_order;
+    for (int order_n = src_order + reorder_dir; order_n != dst_order + reorder_dir; order_n += reorder_dir)
+        table->Columns[table->DisplayOrderToIndex[order_n]].DisplayOrder -= (ImGuiTableColumnIdx)reorder_dir;
+    //IM_ASSERT(dst_column->DisplayOrder == dst_order - reorder_dir);
+
+    // Display order is stored in both columns->IndexDisplayOrder and table->DisplayOrder[]. Rebuild later from the former.
+    // FIXME-OPT: If this is called multiple times we'd effectively have a O(N^2) thing going on.
+    for (int n = 0; n < table->ColumnsCount; n++)
+        table->DisplayOrderToIndex[table->Columns[n].DisplayOrder] = (ImGuiTableColumnIdx)n;
+    table->IsSettingsDirty = true;
+}
+
+// Reorder requested by user indirection needs to verify
+// - That we don't reorder columns with the ImGuiTableColumnFlags_NoReorder flag.
+// - That we don't cross the frozen column limit.
+//   (that TableSetupScrollFreeze() enforce a display order range for frozen columns.
+//    so reordering a column across the frozen column barrier is illegal and will be undone.)
+void ImGui::TableQueueSetColumnDisplayOrder(ImGuiTable* table, int column_n, int dst_order)
+{
+    ImGuiTableColumn* src_column = &table->Columns[column_n];
+    ImGuiTableColumn* dst_column = &table->Columns[table->DisplayOrderToIndex[dst_order]];
+    if ((src_column->Flags | dst_column->Flags) & ImGuiTableColumnFlags_NoReorder) // FIXME: Perform a sweep test?
+        return;
+    int src_i = (src_column->IndexWithinEnabledSet != -1) ? src_column->IndexWithinEnabledSet : table->Columns.index_from_ptr(src_column); // FIXME: Hidden columns don't count into the FreezeColumns count, so what to do here is ill-defined. For now we use regular index.
+    int dst_i = (dst_column->IndexWithinEnabledSet != -1) ? dst_column->IndexWithinEnabledSet : table->Columns.index_from_ptr(dst_column);
+    if ((src_i < table->FreezeColumnsRequest) != (dst_i < table->FreezeColumnsRequest))
+        return;
+    table->ReorderColumn = (ImGuiTableColumnIdx)column_n;
+    table->ReorderColumnDstOrder = (ImGuiTableColumnIdx)dst_order;
 }
 
 // Adjust flags: default width mode + stretch columns are not allowed when auto extending
@@ -3211,21 +3232,19 @@ void ImGui::TableHeader(const char* label)
     // FIXME-TABLE: Scroll request while reordering a column and it lands out of the scrolling zone.
     if (held && (table->Flags & ImGuiTableFlags_Reorderable) && IsMouseDragging(0) && !g.DragDropActive)
     {
-        // While moving a column it will jump on the other side of the mouse, so we also test for MouseDelta.x
-        table->ReorderColumn = (ImGuiTableColumnIdx)column_n;
+        // - While moving a column it will jump on the other side of the mouse, so we also test for MouseDelta.x
+        // - We need to handle reordering across hidden columns.
+        //   In the configuration below, moving C to the right of E will lead to:
+        //      ... C [D] E  --->  ... [D] E  C   (Column name/index)
+        //      ... 2  3  4        ...  2  3  4   (Display order)
+        // - The other constraints are enforced by TableQueueSetColumnDisplayOrder() which might early out.
         table->InstanceInteracted = table->InstanceCurrent;
-
-        // We don't reorder: through the frozen<>unfrozen line, or through a column that is marked with ImGuiTableColumnFlags_NoReorder.
         if (g.IO.MouseDelta.x < 0.0f && g.IO.MousePos.x < cell_r.Min.x)
             if (ImGuiTableColumn* prev_column = (column->PrevEnabledColumn != -1) ? &table->Columns[column->PrevEnabledColumn] : NULL)
-                if (!((column->Flags | prev_column->Flags) & ImGuiTableColumnFlags_NoReorder))
-                    if ((column->IndexWithinEnabledSet < table->FreezeColumnsRequest) == (prev_column->IndexWithinEnabledSet < table->FreezeColumnsRequest))
-                        table->ReorderColumnDir = -1;
+                TableQueueSetColumnDisplayOrder(table, column_n, prev_column->DisplayOrder);
         if (g.IO.MouseDelta.x > 0.0f && g.IO.MousePos.x > cell_r.Max.x)
             if (ImGuiTableColumn* next_column = (column->NextEnabledColumn != -1) ? &table->Columns[column->NextEnabledColumn] : NULL)
-                if (!((column->Flags | next_column->Flags) & ImGuiTableColumnFlags_NoReorder))
-                    if ((column->IndexWithinEnabledSet < table->FreezeColumnsRequest) == (next_column->IndexWithinEnabledSet < table->FreezeColumnsRequest))
-                        table->ReorderColumnDir = +1;
+                TableQueueSetColumnDisplayOrder(table, column_n, next_column->DisplayOrder);
     }
 
     // Sort order arrow
@@ -3264,7 +3283,7 @@ void ImGui::TableHeader(const char* label)
         SetItemTooltip("%.*s", (int)(label_end - label), label);
 
     // We don't use BeginPopupContextItem() because we want the popup to stay up even after the column is hidden
-    if (IsMouseReleased(1) && IsItemHovered())
+    if (IsPopupOpenRequestForItem(ImGuiPopupFlags_None, id))
         TableOpenContextMenu(column_n);
 }
 
