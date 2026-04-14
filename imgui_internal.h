@@ -1,4 +1,4 @@
-// dear imgui, v1.92.7 WIP
+// dear imgui, v1.92.8 WIP
 // (internal structures/api)
 
 // You may use this file to debug, understand or extend Dear ImGui features but we don't provide any guarantee of forward compatibility.
@@ -251,6 +251,9 @@ extern IMGUI_API ImGuiContext* GImGui;  // Current implicit context pointer
 #define IMGUI_DEBUG_LOG_IO(...)         do { if (g.DebugLogFlags & ImGuiDebugLogFlags_EventIO)          IMGUI_DEBUG_LOG(__VA_ARGS__); } while (0)
 #define IMGUI_DEBUG_LOG_FONT(...)       do { ImGuiContext* g2 = GImGui; if (g2 && g2->DebugLogFlags & ImGuiDebugLogFlags_EventFont) IMGUI_DEBUG_LOG(__VA_ARGS__); } while (0) // Called from ImFontAtlas function which may operate without a context.
 #define IMGUI_DEBUG_LOG_INPUTROUTING(...) do{if (g.DebugLogFlags & ImGuiDebugLogFlags_EventInputRouting)IMGUI_DEBUG_LOG(__VA_ARGS__); } while (0)
+
+// Debug options (also see ones on top of imgui.cpp)
+//#define IMGUI_DEBUG_BOXSELECT
 
 // Static Asserts
 #define IM_STATIC_ASSERT(_COND)         static_assert(_COND, "")
@@ -1245,7 +1248,8 @@ struct IMGUI_API ImGuiInputTextState
     bool                    CursorFollow;           // set when we want scrolling to follow the current cursor position (not always!)
     bool                    CursorCenterY;          // set when we want scrolling to be centered over the cursor position (while resizing a word-wrapping field)
     bool                    SelectedAllMouseLock;   // after a double-click to select all, we ignore further mouse drags to update selection
-    bool                    Edited;                 // edited this frame
+    bool                    EditedBefore;           // edited since activated
+    bool                    EditedThisFrame;        // edited this frame
     bool                    WantReloadUserBuf;      // force a reload of user buf so it may be modified externally. may be automatic in future version.
     ImS8                    LastMoveDirectionLR;    // ImGuiDir_Left or ImGuiDir_Right. track last movement direction so when cursor cross over a word-wrapping boundaries we can display it on either line depending on last move.s
     int                     ReloadSelectionStart;
@@ -1911,7 +1915,8 @@ struct IMGUI_API ImGuiMultiSelectTempData
     ImGuiMultiSelectFlags   Flags;
     ImVec2                  ScopeRectMin;
     ImVec2                  BackupCursorMaxPos;
-    ImGuiSelectionUserData  LastSubmittedItem;  // Copy of last submitted item data, used to merge output ranges.
+    //ImGuiSelectionUserData CurrSubmittedItem; // Copy of last submitted item data, used to merge output ranges.
+    //ImGuiSelectionUserData PrevSubmittedItem; // Copy of previous submitted item data, used to merge output ranges.
     ImGuiID                 BoxSelectId;
     ImGuiKeyChord           KeyMods;
     ImS8                    LoopRequestSetAll;  // -1: no operation, 0: clear all, 1: select all.
@@ -2212,6 +2217,7 @@ struct ImGuiContext
     float                   CurrentDpiScale;                    // Current window/viewport DpiScale == CurrentViewport->DpiScale
     ImDrawListSharedData    DrawListSharedData;
     ImGuiID                 WithinEndChildID;                   // Set within EndChild()
+    ImGuiID                 WithinEndPopupID;                   // Set within EndPopup()
     void*                   TestEngine;                         // Test engine user data
 
     // Inputs
@@ -3044,6 +3050,7 @@ struct IMGUI_API ImGuiTable
     ImGuiTableColumnIdx         ResizedColumn;              // Index of column being resized. Reset when InstanceCurrent==0.
     ImGuiTableColumnIdx         LastResizedColumn;          // Index of column being resized from previous frame.
     ImGuiTableColumnIdx         HeldHeaderColumn;           // Index of column header being held.
+    ImGuiTableColumnIdx         LastHeldHeaderColumn;       // Index of column header being held from previous frame.
     ImGuiTableColumnIdx         ReorderColumn;              // Index of column being reordered. (not cleared)
     ImGuiTableColumnIdx         ReorderColumnDstOrder;      // Requested display order of column being reordered.
     ImGuiTableColumnIdx         LeftMostEnabledColumn;      // Index of left-most non-hidden column.
